@@ -11,6 +11,29 @@ from typing import Callable, Any
 from .cache import load_cached, save_cached
 
 
+# AST node types that represent a member-expression callee
+# (`x.foo()`, `obj.bar()`, `Pkg::baz()`). Cross-file name-only resolution of
+# these is unsafe — without receiver type info we routinely link them to the
+# wrong target, producing phantom god nodes (e.g. every `Logger.log(...)` call
+# in a NestJS codebase collapsing onto a one-off `function log(...)` defined
+# in a smoke-test script). The cross-file resolver in `extract()` skips
+# entries whose `callee_node_type` falls in this set.
+_MEMBER_CALL_NODE_TYPES = frozenset({
+    "member_expression",       # JS / TS / Python attribute calls
+    "selector_expression",     # Go
+    "field_expression",        # Rust, C++, Scala
+    "navigation_expression",   # Swift, Kotlin
+    "qualified_identifier",    # C++ (Foo::bar())
+    "scoped_identifier",       # Rust (foo::bar())
+    "scoped_call_expression",  # PHP (Foo::bar())
+    "member_call_expression",  # PHP ($obj->method())
+    "field_access",            # Java
+    "method_invocation",       # Java (when receiver-qualified)
+    "dot",                     # Elixir
+    "_zig_dotted_callee",      # synthetic marker for Zig (callee text contains ".")
+})
+
+
 def _make_id(*parts: str) -> str:
     """Build a stable node ID from one or more name parts."""
     combined = "_".join(p.strip("_.") for p in parts if p)
@@ -1172,13 +1195,16 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                             "weight": 1.0,
                         })
                 elif callee_name and not tgt_nid:
-                    # Callee not in this file — save for cross-file resolution in extract()
+                    # Callee not in this file — save for cross-file resolution in extract().
+                    # Track the AST node type so the cross-file resolver can refuse to
+                    # name-match member-expression callees (`x.foo()`).
                     raw_calls.append({
                         "caller_nid": caller_nid,
                         "callee": callee_name,
                         "is_member_call": is_member_call,
                         "source_file": str_path,
                         "source_location": f"L{node.start_point[0] + 1}",
+                        "callee_node_type": func_node.type if func_node is not None else None,
                     })
 
             # Helper function calls: config('foo.bar') → uses_config edge to "foo"
@@ -2131,6 +2157,7 @@ def extract_go(path: Path) -> dict:
                         "is_member_call": is_member_call,
                         "source_file": str_path,
                         "source_location": f"L{node.start_point[0] + 1}",
+                        "callee_node_type": func_node.type if func_node is not None else None,
                     })
         for child in node.children:
             walk_calls(child, caller_nid)
@@ -2311,6 +2338,7 @@ def extract_rust(path: Path) -> dict:
                         "is_member_call": is_member_call,
                         "source_file": str_path,
                         "source_location": f"L{node.start_point[0] + 1}",
+                        "callee_node_type": func_node.type if func_node is not None else None,
                     })
         for child in node.children:
             walk_calls(child, caller_nid)
@@ -2482,6 +2510,13 @@ def extract_zig(path: Path) -> dict:
                         "is_member_call": is_member_call,
                         "source_file": str_path,
                         "source_location": f"L{node.start_point[0] + 1}",
+                        # Zig: callee is `_read_text(fn, source).split(".")[-1]`,
+                        # so a "." in the original text means it was a member call.
+                        "callee_node_type": (
+                            "_zig_dotted_callee"
+                            if "." in _read_text(fn, source)
+                            else fn.type
+                        ),
                     })
         for child in node.children:
             walk_calls(child, caller_nid)
@@ -2647,6 +2682,7 @@ def extract_powershell(path: Path) -> dict:
                             "is_member_call": False,
                             "source_file": str_path,
                             "source_location": f"L{node.start_point[0] + 1}",
+                            "callee_node_type": "command_name",
                         })
         for child in node.children:
             walk_calls(child, caller_nid)
@@ -3265,6 +3301,9 @@ def extract_elixir(path: Path) -> dict:
                     "is_member_call": is_member_call,
                     "source_file": str_path,
                     "source_location": f"L{node.start_point[0] + 1}",
+                    # Elixir: `child` is the node we just inspected — `dot` for
+                    # `Mod.fn(...)`, `identifier` for a bare local call.
+                    "callee_node_type": child.type,
                 })
         for child in node.children:
             walk_calls(child, caller_nid)
@@ -3462,6 +3501,14 @@ def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
     existing_pairs = {(e["source"], e["target"]) for e in all_edges}
     for result in per_file:
         for rc in result.get("raw_calls", []):
+            # Member-expression callees (`x.foo()`, `obj.bar()`, `Pkg::baz()`)
+            # cannot be safely resolved by bare property name across files —
+            # without receiver-type analysis we routinely link them to the
+            # wrong target, producing phantom god nodes (e.g. every
+            # `Logger.log(...)` call collapsing onto a one-off
+            # `function log(...)` defined in a smoke-test script).
+            if rc.get("callee_node_type") in _MEMBER_CALL_NODE_TYPES:
+                continue
             callee = rc.get("callee", "")
             if not callee:
                 continue
