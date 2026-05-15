@@ -14,6 +14,11 @@ build/
 *.egg
 .graphify/
 graphify-out/
+# Committed evaluation artifacts under evaluations/ are intentional evidence — keep them
+!evaluations/**/graphify-out/
+!evaluations/**/graphify-out-with-tests/
+!evaluations/**/graphify-out/**
+!evaluations/**/graphify-out-with-tests/**
 .graphify_*.json
 .graphify_python
 .claude/
