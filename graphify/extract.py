@@ -9060,6 +9060,123 @@ def extract_json(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+# ── CSS / SCSS / SASS extractor ──────────────────────────────────────────────
+
+def extract_sass(path: Path) -> dict:
+    """Extract variables, mixins, selectors, and @import/@use edges from CSS/SCSS/SASS files."""
+    try:
+        import tree_sitter_css as tscss
+        from tree_sitter import Language, Parser
+    except ImportError:
+        return {"nodes": [], "edges": [], "error": "tree-sitter-css not installed"}
+
+    try:
+        language = Language(tscss.language())
+        parser = Parser(language)
+        source = path.read_bytes()
+        tree = parser.parse(source)
+        root = tree.root_node
+    except Exception as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
+
+    stem = _file_stem(path)
+    str_path = str(path)
+    source_text = source.decode("utf-8", errors="replace")
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    seen_ids: set[str] = set()
+
+    def add_node(nid: str, label: str, line: int, kind: str = "code") -> None:
+        if nid and nid not in seen_ids:
+            seen_ids.add(nid)
+            nodes.append({
+                "id": nid, "label": label, "file_type": "code",
+                "source_file": str_path, "source_location": f"L{line}",
+                "metadata": {"language": "scss", "kind": kind},
+            })
+
+    def add_edge(src: str, tgt: str, relation: str, line: int,
+                 confidence: str = "EXTRACTED") -> None:
+        if not src or not tgt or src == tgt:
+            return
+        edges.append({
+            "source": src, "target": tgt, "relation": relation,
+            "confidence": confidence, "confidence_score": 1.0,
+            "source_file": str_path, "source_location": f"L{line}", "weight": 1.0,
+        })
+
+    def _text(node) -> str:
+        return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace").strip()
+
+    file_nid = _make_id(str(path))
+    add_node(file_nid, path.name, 1, kind="file")
+
+    # --- Regex pass for SCSS-specific syntax that tree-sitter-css marks as ERROR ---
+    # $variable declarations
+    for m in re.finditer(r'^\s*(\$[\w-]+)\s*:', source_text, re.MULTILINE):
+        var_name = m.group(1)
+        line = source_text[:m.start()].count("\n") + 1
+        var_nid = _make_id(stem, var_name.lstrip("$"))
+        add_node(var_nid, var_name, line, kind="variable")
+        add_edge(file_nid, var_nid, "defines", line)
+
+    # @use / @forward (treated as ERROR nodes by the CSS grammar)
+    for m in re.finditer(r'^@(?:use|forward)\s+[\'"]([^\'"]+)[\'"]', source_text, re.MULTILINE):
+        raw = m.group(1)
+        line = source_text[:m.start()].count("\n") + 1
+        imp_nid = _make_id(stem, raw)
+        add_node(imp_nid, raw, line, kind="import")
+        add_edge(file_nid, imp_nid, "imports", line)
+
+    # --- AST walk for nodes the CSS grammar parses correctly ---
+    def walk(node) -> None:
+        t = node.type
+        line = node.start_point[0] + 1
+
+        if t == "import_statement":
+            # @import 'path'; — parsed as import_statement by tree-sitter-css
+            sv = next((c for c in node.children if c.type == "string_value"), None)
+            if sv:
+                raw = _text(sv).strip("'\"")
+                if raw:
+                    imp_nid = _make_id(stem, raw)
+                    add_node(imp_nid, raw, line, kind="import")
+                    add_edge(file_nid, imp_nid, "imports", line)
+
+        elif t == "at_rule":
+            at_kw = next((c for c in node.children if c.type == "at_keyword"), None)
+            if at_kw:
+                keyword = _text(at_kw).lstrip("@")
+                # mixin name lives in keyword_query in the CSS grammar
+                kq = next((c for c in node.children if c.type == "keyword_query"), None)
+                if keyword == "mixin" and kq:
+                    mixin_name = _text(kq)
+                    mixin_nid = _make_id(stem, f"mixin_{mixin_name}")
+                    add_node(mixin_nid, f"@mixin {mixin_name}", line, kind="mixin")
+                    add_edge(file_nid, mixin_nid, "defines", line)
+                elif keyword == "include" and kq:
+                    mixin_name = _text(kq)
+                    target_nid = _make_id(stem, f"mixin_{mixin_name}")
+                    confidence = "EXTRACTED" if target_nid in seen_ids else "INFERRED"
+                    add_edge(file_nid, target_nid, "calls", line, confidence=confidence)
+
+        elif t == "rule_set":
+            sel_node = node.child_by_field_name("selectors") or next(
+                (c for c in node.children if "selector" in c.type), None
+            )
+            if sel_node:
+                sel_text = _text(sel_node)[:64]
+                sel_nid = _make_id(stem, sel_text)
+                add_node(sel_nid, sel_text, line, kind="selector")
+                add_edge(file_nid, sel_nid, "defines", line)
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return {"nodes": nodes, "edges": edges}
+
+
 # ── DM (BYOND DreamMaker) extractor ──────────────────────────────────────────
 # DM identity is path-based (`/datum/object/proc/New()`), not block-based, so
 # the generic class-body walker doesn't fit well.
@@ -9635,6 +9752,9 @@ _DISPATCH: dict[str, Any] = {
     ".lpk": extract_lazarus_package,
     ".sh": extract_bash,
     ".bash": extract_bash,
+    ".css": extract_sass,
+    ".scss": extract_sass,
+    ".sass": extract_sass,
     ".json": extract_json,
     ".dm": extract_dm,
     ".dme": extract_dm,

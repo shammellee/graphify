@@ -1,0 +1,36 @@
+@use 'variables';
+@import 'mixins/buttons';
+
+$primary-color: #333;
+$font-size-base: 16px;
+
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin respond-to($breakpoint) {
+  @if $breakpoint == 'mobile' {
+    @media (max-width: 768px) { @content; }
+  }
+}
+
+.container {
+  color: $primary-color;
+  font-size: $font-size-base;
+  @include flex-center;
+}
+
+#header {
+  background: #fff;
+
+  .nav-link {
+    color: $primary-color;
+  }
+}
+
+button.primary {
+  @include flex-center;
+  padding: 8px 16px;
+}

@@ -8,6 +8,7 @@ from graphify.extract import (
     extract_swift, extract_go, extract_julia, extract_js, extract_fortran,
     extract_groovy, extract_sln, extract_csproj, extract_razor,
     extract_dm, extract_dmi, extract_dmm, extract_dmf,
+    extract_sass,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1318,3 +1319,35 @@ def test_razor_no_dangling_edges():
     node_ids = {n["id"] for n in r["nodes"]}
     for e in r["edges"]:
         assert e["source"] in node_ids
+
+
+# ── SCSS / SASS ───────────────────────────────────────────────────────────────
+
+def test_extract_scss_no_error():
+    r = extract_sass(FIXTURES / "sample.scss")
+    assert "error" not in r
+
+def test_extract_scss_finds_variable():
+    r = extract_sass(FIXTURES / "sample.scss")
+    labels = _labels(r)
+    assert any("$primary-color" in l for l in labels)
+
+def test_extract_scss_finds_mixin():
+    r = extract_sass(FIXTURES / "sample.scss")
+    labels = _labels(r)
+    assert any("flex-center" in l for l in labels)
+
+def test_extract_scss_import_edge():
+    r = extract_sass(FIXTURES / "sample.scss")
+    assert "imports" in _relations(r)
+
+def test_extract_scss_defines_selectors():
+    r = extract_sass(FIXTURES / "sample.scss")
+    assert "defines" in _relations(r)
+
+def test_extract_scss_no_dangling_edges():
+    r = extract_sass(FIXTURES / "sample.scss")
+    node_ids = {n["id"] for n in r["nodes"]}
+    for e in r["edges"]:
+        if e["confidence"] == "EXTRACTED":
+            assert e["source"] in node_ids, f"dangling source: {e}"
