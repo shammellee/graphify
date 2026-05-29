@@ -307,6 +307,16 @@ graphify query "what connects DigestAuth to Response?" --graph graphify-out/grap
 # expose the graph as an MCP server (for repeated tool-call access)
 python -m graphify.serve graphify-out/graph.json
 
+# register with Claude Code (then restart Claude Code to activate):
+claude mcp add graphify -- python -m graphify.serve graphify-out/graph.json
+
+# update to a different project (then restart Claude Code):
+claude mcp remove graphify
+claude mcp add graphify -- python -m graphify.serve /path/to/other-project/graphify-out/graph.json
+
+# verify registration:
+claude mcp list
+
 # register with Kimi Code:
 kimi mcp add --transport stdio graphify -- python -m graphify.serve graphify-out/graph.json
 ```
